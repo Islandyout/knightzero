@@ -8,6 +8,7 @@ type Mode='computer'|'local';
 type SideChoice='w'|'b'|'random';
 type TimeKey='untimed'|'3+2'|'5+0'|'10+0'|'15+10';
 type PromotionState={from:Square;to:Square;color:Color}|null;
+type HintCandidate={from:Square;to:Square;promotion?:PieceSymbol;san:string;rank:number;score:string};
 const times:Record<TimeKey,{seconds:number|null;increment:number}>={untimed:{seconds:null,increment:0},'3+2':{seconds:180,increment:2},'5+0':{seconds:300,increment:0},'10+0':{seconds:600,increment:0},'15+10':{seconds:900,increment:10}};
 const strengths=[
  {name:'Beginner',elo:1350,skill:0,time:120,limit:true},
@@ -21,6 +22,7 @@ const strengths=[
 function copyGame(source:Chess){const next=new Chess();const pgn=source.pgn();if(pgn)next.loadPgn(pgn);return next}
 function gameAtPly(source:Chess,ply:number){const moves=source.history({verbose:true});const view=new Chess();for(let i=0;i<Math.min(ply,moves.length);i++)view.move(moves[i].san);return view}
 function formatClock(value:number|null){if(value===null)return '∞';const t=Math.max(0,Math.ceil(value));const m=Math.floor(t/60);const s=t%60;return `${m}:${String(s).padStart(2,'0')}`}
+function lineScore(cp:number|undefined,mate:number|undefined){if(mate!==undefined)return mate>0?`M${mate}`:`-M${Math.abs(mate)}`;const value=(cp??0)/100;return `${value>=0?'+':''}${value.toFixed(2)}`}
 
 export default function App(){
  const [game,setGame]=useState(()=>new Chess());
@@ -36,6 +38,8 @@ export default function App(){
  const [last,setLast]=useState<{from:Square;to:Square}|null>(null);
  const [settings,setSettings]=useState(false);
  const [hint,setHint]=useState<{from:Square;to:Square}|null>(null);
+ const [hintCandidates,setHintCandidates]=useState<HintCandidate[]>([]);
+ const [hintLoading,setHintLoading]=useState(false);
  const [reviewPly,setReviewPly]=useState<number|null>(null);
  const [promotion,setPromotion]=useState<PromotionState>(null);
  const [manualResult,setManualResult]=useState<string|null>(null);
@@ -43,10 +47,10 @@ export default function App(){
  const [engineState,setEngineState]=useState<'loading'|'ready'|'error'>('loading');
  const [evalCp,setEvalCp]=useState(0);
  const [evalMate,setEvalMate]=useState<number|null>(null);
- const [engineBest,setEngineBest]=useState<string|null>(null);
  const [pv,setPv]=useState<string[]>([]);
  const playEngine=useRef<StockfishEngine|null>(null);
  const evalEngine=useRef<StockfishEngine|null>(null);
+ const hintEngine=useRef<StockfishEngine|null>(null);
 
  const history=game.history({verbose:true});
  const shownPly=reviewPly===null?history.length:Math.min(reviewPly,history.length);
@@ -65,19 +69,19 @@ export default function App(){
  const increment=times[timeKey].increment;
 
  useEffect(()=>{
-  try{playEngine.current=new StockfishEngine();evalEngine.current=new StockfishEngine()}catch{setEngineState('error')}
-  return()=>{playEngine.current?.destroy();evalEngine.current?.destroy()}
+  try{playEngine.current=new StockfishEngine();evalEngine.current=new StockfishEngine();hintEngine.current=new StockfishEngine()}catch{setEngineState('error')}
+  return()=>{playEngine.current?.destroy();evalEngine.current?.destroy();hintEngine.current?.destroy()}
  },[]);
 
  useEffect(()=>{
   let cancelled=false;
   const engine=evalEngine.current;if(!engine)return;
-  engine.search(displayFen,{skill:20,movetime:260}).then(result=>{
+  engine.search(displayFen,{skill:20,movetime:260,multipv:1}).then(result=>{
     if(cancelled)return;
     const perspective=displayGame.turn()==='w'?1:-1;
     const cp=(result.score.cp??0)*perspective;
     const mate=result.score.mate===undefined?null:result.score.mate*perspective;
-    setEvalCp(cp);setEvalMate(mate);setEngineBest(result.bestMove);setPv(result.score.pv);setEngineState('ready');
+    setEvalCp(cp);setEvalMate(mate);setPv(result.score.pv);setEngineState('ready');
   }).catch(()=>{if(!cancelled)setEngineState('error')});
   return()=>{cancelled=true}
  },[displayFen]);
@@ -86,7 +90,7 @@ export default function App(){
   if(mode!=='computer'||reviewPly!==null||thinking||gameOver||game.turn()===playerColor)return;
   const engine=playEngine.current;if(!engine)return;
   const fen=game.fen();const mover=game.turn();setThinking(true);
-  engine.search(fen,{skill:cfg.skill,movetime:cfg.time,limitStrength:cfg.limit,elo:cfg.elo}).then(result=>{
+  engine.search(fen,{skill:cfg.skill,movetime:cfg.time,limitStrength:cfg.limit,elo:cfg.elo,multipv:1}).then(result=>{
     const move=uciToMove(result.bestMove);
     if(!move)return;
     setGame(current=>{
@@ -99,40 +103,31 @@ export default function App(){
 
  useEffect(()=>{
   if(gameOver||reviewPly!==null||times[timeKey].seconds===null)return;
-  const id=window.setInterval(()=>{
-    const turn=game.turn();
-    setClocks(c=>({...c,[turn]:c[turn]===null?null:Math.max(0,(c[turn] as number)-0.25)}));
-  },250);
+  const id=window.setInterval(()=>{const turn=game.turn();setClocks(c=>({...c,[turn]:c[turn]===null?null:Math.max(0,(c[turn] as number)-0.25)}))},250);
   return()=>window.clearInterval(id)
  },[game,gameOver,reviewPly,timeKey]);
 
- useEffect(()=>{
-  if(manualResult)return;
-  if(clocks.w!==null&&clocks.w<=0)setManualResult('Time · Black wins');
-  else if(clocks.b!==null&&clocks.b<=0)setManualResult('Time · White wins');
- },[clocks.w,clocks.b,manualResult]);
+ useEffect(()=>{if(manualResult)return;if(clocks.w!==null&&clocks.w<=0)setManualResult('Time · Black wins');else if(clocks.b!==null&&clocks.b<=0)setManualResult('Time · White wins')},[clocks.w,clocks.b,manualResult]);
 
+ function clearHints(){setHint(null);setHintCandidates([]);setHintLoading(false)}
  function resetPosition(){
   const resolved:Color=sideChoice==='random'?(Math.random()<.5?'w':'b'):sideChoice;
   const base=times[timeKey].seconds;
-  setPlayerColor(resolved);setFlip(mode==='computer'&&resolved==='b');setGame(new Chess());setClocks({w:base,b:base});setSelected(null);setLast(null);setHint(null);setThinking(false);setReviewPly(null);setPromotion(null);setManualResult(null);setConfirmResign(false);
+  setPlayerColor(resolved);setFlip(mode==='computer'&&resolved==='b');setGame(new Chess());setClocks({w:base,b:base});setSelected(null);setLast(null);clearHints();setThinking(false);setReviewPly(null);setPromotion(null);setManualResult(null);setConfirmResign(false);
  }
  function completeMove(from:Square,to:Square,promotionPiece?:PieceSymbol){
   if(reviewPly!==null||thinking||gameOver)return;
   if(mode==='computer'&&game.turn()!==playerColor)return;
   const mover=game.turn();const next=copyGame(game);
-  try{const played=next.move({from,to,promotion:promotionPiece});setLast({from:played.from,to:played.to});setSelected(null);setHint(null);setPromotion(null);setGame(next);setClocks(c=>({...c,[mover]:c[mover]===null?null:(c[mover] as number)+increment}))}catch{setSelected(null)}
+  try{const played=next.move({from,to,promotion:promotionPiece});setLast({from:played.from,to:played.to});setSelected(null);clearHints();setPromotion(null);setGame(next);setClocks(c=>({...c,[mover]:c[mover]===null?null:(c[mover] as number)+increment}))}catch{setSelected(null)}
  }
  function attemptMove(from:Square,to:Square){
   const p=game.get(from);if(!p)return;
-  if(p.type==='p'&&((p.color==='w'&&to[1]==='8')||(p.color==='b'&&to[1]==='1'))){
-    const promotions=game.moves({square:from,verbose:true}).filter(m=>m.to===to&&m.promotion);
-    if(promotions.length){setPromotion({from,to,color:p.color});return}
-  }
+  if(p.type==='p'&&((p.color==='w'&&to[1]==='8')||(p.color==='b'&&to[1]==='1'))){const promotions=game.moves({square:from,verbose:true}).filter(m=>m.to===to&&m.promotion);if(promotions.length){setPromotion({from,to,color:p.color});return}}
   completeMove(from,to);
  }
  function press(sq:Square){
-  if(reviewPly!==null||thinking||gameOver)return;setHint(null);
+  if(reviewPly!==null||thinking||gameOver)return;clearHints();
   if(mode==='computer'&&game.turn()!==playerColor)return;
   const p=game.get(sq);
   if(!selected){if(p&&p.color===game.turn())setSelected(sq);return}
@@ -140,16 +135,34 @@ export default function App(){
   if(legal.has(sq)){attemptMove(selected,sq);return}
   if(p&&p.color===game.turn())setSelected(sq);else setSelected(null);
  }
- function handleDragStart(sq:Square,e:DragEvent<HTMLButtonElement>){const p=game.get(sq);if(reviewPly!==null||!p||p.color!==game.turn()||(mode==='computer'&&p.color!==playerColor)){e.preventDefault();return}e.dataTransfer.setData('text/plain',sq)}
+ function handleDragStart(sq:Square,e:DragEvent<HTMLButtonElement>){const p=game.get(sq);if(reviewPly!==null||!p||p.color!==game.turn()||(mode==='computer'&&p.color!==playerColor)){e.preventDefault();return}clearHints();e.dataTransfer.setData('text/plain',sq)}
  function handleDrop(to:Square,e:DragEvent<HTMLButtonElement>){e.preventDefault();const from=e.dataTransfer.getData('text/plain') as Square;if(from&&from!==to)attemptMove(from,to)}
  function undo(){
   if(thinking)return;setReviewPly(null);setManualResult(null);const next=copyGame(game);
   if(mode==='computer'){next.undo();if(next.turn()!==playerColor)next.undo()}else next.undo();
-  const h=next.history({verbose:true});const lm=h[h.length-1];setGame(next);setSelected(null);setHint(null);setLast(lm?{from:lm.from,to:lm.to}:null);
+  const h=next.history({verbose:true});const lm=h[h.length-1];setGame(next);setSelected(null);clearHints();setLast(lm?{from:lm.from,to:lm.to}:null);
  }
- function showHint(){if(reviewPly!==null||gameOver)return;const move=uciToMove(engineBest);if(move){setHint({from:move.from as Square,to:move.to as Square});setSelected(move.from as Square)}}
- function previousMove(){if(!history.length)return;setSelected(null);setHint(null);setReviewPly(Math.max(0,shownPly-1))}
- function nextMove(){if(reviewPly===null)return;const n=Math.min(history.length,shownPly+1);setSelected(null);setHint(null);setReviewPly(n>=history.length?null:n)}
+ async function showHint(){
+  if(reviewPly!==null||gameOver||thinking||hintLoading)return;
+  const engine=hintEngine.current;if(!engine)return;
+  const fen=game.fen();setHintLoading(true);setHint(null);setHintCandidates([]);
+  try{
+    const result=await engine.search(fen,{skill:20,movetime:650,multipv:4});
+    if(game.fen()!==fen)return;
+    const source=result.lines.length?result.lines:result.bestMove?[{multipv:1,pv:[result.bestMove],cp:result.score.cp,mate:result.score.mate}]:[];
+    const candidates:HintCandidate[]=[];
+    for(const line of source.slice(0,4)){
+      const move=uciToMove(line.pv[0]??null);if(!move)continue;
+      const next=copyGame(game);
+      try{const played=next.move({from:move.from as Square,to:move.to as Square,promotion:(move.promotion||'q') as PieceSymbol});candidates.push({from:played.from,to:played.to,promotion:played.promotion, san:played.san,rank:line.multipv,score:lineScore(line.cp,line.mate)})}catch{}
+    }
+    setHintCandidates(candidates);
+    if(candidates[0]){setHint({from:candidates[0].from,to:candidates[0].to});setSelected(candidates[0].from)}
+  }catch{setEngineState('error')}finally{setHintLoading(false)}
+ }
+ function chooseHint(candidate:HintCandidate){setHint({from:candidate.from,to:candidate.to});setSelected(candidate.from)}
+ function previousMove(){if(!history.length)return;setSelected(null);clearHints();setReviewPly(Math.max(0,shownPly-1))}
+ function nextMove(){if(reviewPly===null)return;const n=Math.min(history.length,shownPly+1);setSelected(null);clearHints();setReviewPly(n>=history.length?null:n)}
  function resign(){const loser=mode==='computer'?playerColor:game.turn();setManualResult(`Resigned · ${loser==='w'?'Black':'White'} wins`);setConfirmResign(false)}
 
  const topColor:Color=mode==='computer'?(playerColor==='w'?'b':'w'):'b';
@@ -157,10 +170,11 @@ export default function App(){
  return <div className="app">
   <header><button className="head-btn" aria-label="Back">‹</button><div className="brand"><span>♟</span><b>KnightZero</b></div><button className="head-btn" aria-label="Settings" onClick={()=>setSettings(v=>!v)}>⚙</button></header>
   <main><section className="game">
-   <div className="player-row opponent"><div className="avatar">KZ</div><div className="player-name"><b>{mode==='computer'?`KnightZero · ${cfg.name}`:'Player 2'}</b><small>{reviewPly!==null?'Reviewing game':thinking?'Stockfish thinking…':engineState==='error'?'Engine unavailable':'Ready'}</small></div><strong className="clock">{formatClock(clocks[topColor])}</strong></div>
-   <div className="board-shell"><div className="eval-bar" aria-label={`Stockfish evaluation ${evalLabel}`}><div className="eval-white" style={{height:`${whiteShare}%`}}/><span>{engineState==='ready'?evalLabel:'…'}</span></div><div className="board" role="grid">{squares.map((sq,index)=>{const p=displayGame.get(sq);const f=files.indexOf(sq[0]);const r=Number(sq[1]);const dark=(f+r)%2===1;const target=legal.has(sq);const displayLast=latest?{from:latest.from,to:latest.to}:last;const recent=!!displayLast&&(displayLast.from===sq||displayLast.to===sq);const hinted=reviewPly===null&&!!hint&&(hint.from===sq||hint.to===sq);const row=Math.floor(index/8),col=index%8;const cellStyle:CSSProperties={left:`${col*12.5}%`,top:`${row*12.5}%`,width:'12.5%',height:'12.5%'};return <button key={sq} style={cellStyle} onClick={()=>press(sq)} draggable={reviewPly===null&&!!p} onDragStart={e=>handleDragStart(sq,e)} onDragOver={e=>e.preventDefault()} onDrop={e=>handleDrop(sq,e)} className={`square ${dark?'dark':'light'} ${selected===sq?'active':''} ${recent?'recent':''} ${hinted?'hinted':''}`} aria-label={sq}>{p&&<span className={`piece ${p.color}`}>{glyph[p.color+p.type]}</span>}{target&&<i className={p?'capture':'dot'}/>} {col===0&&<span className="rank-label">{sq[1]}</span>}{row===7&&<span className="file-label">{sq[0]}</span>}</button>})}</div></div>
+   <div className="player-row opponent"><div className="avatar">KZ</div><div className="player-name"><b>{mode==='computer'?`KnightZero · ${cfg.name}`:'Player 2'}</b><small>{reviewPly!==null?'Reviewing game':thinking?'Stockfish thinking…':hintLoading?'Analyzing hints…':engineState==='error'?'Engine unavailable':'Ready'}</small></div><strong className="clock">{formatClock(clocks[topColor])}</strong></div>
+   <div className="board-shell"><div className="eval-bar" aria-label={`Stockfish evaluation ${evalLabel}`}><div className="eval-white" style={{height:`${whiteShare}%`}}/><span>{engineState==='ready'?evalLabel:'…'}</span></div><div className="board" role="grid">{squares.map((sq,index)=>{const p=displayGame.get(sq);const f=files.indexOf(sq[0]);const r=Number(sq[1]);const dark=(f+r)%2===1;const target=legal.has(sq);const displayLast=latest?{from:latest.from,to:latest.to}:last;const recent=!!displayLast&&(displayLast.from===sq||displayLast.to===sq);const hinted=reviewPly===null&&hintCandidates.some(c=>c.from===sq||c.to===sq);const primary=reviewPly===null&&!!hint&&(hint.from===sq||hint.to===sq);const row=Math.floor(index/8),col=index%8;const cellStyle:CSSProperties={left:`${col*12.5}%`,top:`${row*12.5}%`,width:'12.5%',height:'12.5%'};return <button key={sq} style={cellStyle} onClick={()=>press(sq)} draggable={reviewPly===null&&!!p} onDragStart={e=>handleDragStart(sq,e)} onDragOver={e=>e.preventDefault()} onDrop={e=>handleDrop(sq,e)} className={`square ${dark?'dark':'light'} ${selected===sq?'active':''} ${recent?'recent':''} ${hinted?'hinted':''} ${primary?'hint-primary':''}`} aria-label={sq}>{p&&<span className={`piece ${p.color}`}>{glyph[p.color+p.type]}</span>}{target&&<i className={p?'capture':'dot'}/>} {col===0&&<span className="rank-label">{sq[1]}</span>}{row===7&&<span className="file-label">{sq[0]}</span>}</button>})}</div></div>
    <div className="player-row you-row"><div className="avatar you">YOU</div><div className="player-name"><b>{mode==='computer'?'You':'Player 1'}</b><small>{reviewPly!==null?`Move ${shownPly} of ${history.length}`:status}</small></div><strong className="clock">{formatClock(clocks[bottomColor])}</strong></div>
    <div className="move-strip"><button aria-label="Previous move" onClick={previousMove} disabled={!history.length||shownPly===0}>‹</button><div>{latest?<><span>{Math.ceil(shownPly/2)}{shownPly%2===0?'...':'.'}</span><strong>{latest.san}</strong></>:<span>Starting position</span>}{reviewPly===null&&pv.length>1&&<small className="pv">Best line: {pv.slice(0,4).join(' ')}</small>}</div><button aria-label="Next move" onClick={nextMove} disabled={reviewPly===null}>›</button></div>
+   {(hintLoading||hintCandidates.length>0)&&<div className="hint-tray"><div className="hint-head"><b>{hintLoading?'Stockfish is analyzing…':'Best candidate moves'}</b>{hintCandidates.length>0&&<small>Tap a move to highlight it</small>}</div>{hintCandidates.length>0&&<div className="hint-list">{hintCandidates.map(c=><button key={`${c.rank}-${c.from}-${c.to}`} onClick={()=>chooseHint(c)} className={hint?.from===c.from&&hint?.to===c.to?'on':''}><span>#{c.rank}</span><strong>{c.san}</strong><small>{c.score}</small></button>)}</div>}</div>}
   </section></main>
 
   {promotion&&<div className="modal-backdrop"><div className="promotion-card"><h3>Promote pawn</h3><div>{(['q','r','b','n'] as PieceSymbol[]).map(piece=><button key={piece} onClick={()=>completeMove(promotion.from,promotion.to,piece)}>{glyph[promotion.color+piece]}</button>)}</div><button className="secondary" onClick={()=>setPromotion(null)}>Cancel</button></div></div>}
@@ -168,6 +182,6 @@ export default function App(){
   {gameOver&&<div className="result-toast"><b>{status}</b><button onClick={resetPosition}>Rematch</button></div>}
 
   {settings&&<div className="settings-sheet"><div className="sheet-head"><b>Game setup</b><button onClick={()=>setSettings(false)}>×</button></div><div className="tabs"><button className={mode==='computer'?'on':''} onClick={()=>setMode('computer')}>Computer</button><button className={mode==='local'?'on':''} onClick={()=>setMode('local')}>2 Players</button></div>{mode==='computer'&&<><label className="setting-label">Your side</label><div className="choice-row"><button className={sideChoice==='w'?'on':''} onClick={()=>setSideChoice('w')}>White</button><button className={sideChoice==='random'?'on':''} onClick={()=>setSideChoice('random')}>Random</button><button className={sideChoice==='b'?'on':''} onClick={()=>setSideChoice('b')}>Black</button></div><label className="setting-label">Stockfish strength</label><div className="levels">{strengths.map((s,i)=><button title={`${s.elo} Elo`} key={s.name} className={level===i+1?'on':''} onClick={()=>setLevel(i+1)}>{i+1}</button>)}</div></>}<label className="setting-label">Time control</label><div className="time-grid">{(Object.keys(times) as TimeKey[]).map(t=><button key={t} className={timeKey===t?'on':''} onClick={()=>setTimeKey(t)}>{t==='untimed'?'∞':t}</button>)}</div><div className="sheet-actions"><button className="secondary" onClick={()=>setFlip(v=>!v)}>⇅ Flip</button><button className="start" onClick={()=>{resetPosition();setSettings(false)}}>Start New Game</button></div><div className="online-note"><b>Online play</b><span>Backend-ready phase: Supabase credentials are still required before real matchmaking can be enabled.</span></div></div>}
-  <nav className="bottom-bar"><button onClick={()=>setSettings(true)}>☷<span>Options</span></button><button onClick={()=>history.length?setConfirmResign(true):resetPosition()}>⚑<span>{history.length?'Resign':'New'}</span></button><button disabled={engineState!=='ready'} onClick={showHint}>♙<span>Hint</span></button><button onClick={undo} disabled={!history.length||thinking}>↶<span>Undo</span></button></nav>
+  <nav className="bottom-bar"><button onClick={()=>setSettings(true)}>☷<span>Options</span></button><button onClick={()=>history.length?setConfirmResign(true):resetPosition()}>⚑<span>{history.length?'Resign':'New'}</span></button><button disabled={engineState!=='ready'||hintLoading||thinking} onClick={showHint}>♙<span>{hintLoading?'Thinking':'Hints'}</span></button><button onClick={undo} disabled={!history.length||thinking}>↶<span>Undo</span></button></nav>
  </div>
 }
