@@ -19,7 +19,12 @@ export default defineConfig({
         start_url: '/',
         icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }]
       },
-      workbox: { navigateFallback: '/index.html' }
+      workbox: {
+        navigateFallback: '/index.html',
+        cleanupOutdatedCaches: true,
+        clientsClaim: true,
+        skipWaiting: true
+      }
     })
   ]
 });
