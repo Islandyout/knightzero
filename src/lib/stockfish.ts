@@ -1,5 +1,6 @@
 export type EngineScore={cp?:number;mate?:number;pv:string[]};
-export type SearchResult={bestMove:string|null;score:EngineScore};
+export type EngineLine=EngineScore&{multipv:number};
+export type SearchResult={bestMove:string|null;score:EngineScore;lines:EngineLine[]};
 
 export class StockfishEngine{
   private worker:Worker;
@@ -8,6 +9,7 @@ export class StockfishEngine{
   private readyReject!:(error:Error)=>void;
   private pending:((r:SearchResult)=>void)|null=null;
   private latestScore:EngineScore={cp:0,pv:[]};
+  private latestLines=new Map<number,EngineLine>();
 
   constructor(){
     this.readyPromise=new Promise<void>((resolve,reject)=>{this.readyResolve=resolve;this.readyReject=reject});
@@ -25,20 +27,24 @@ export class StockfishEngine{
       const cp=line.match(/ score cp (-?\d+)/);
       const mate=line.match(/ score mate (-?\d+)/);
       const pv=line.match(/\bpv\s+(.+)$/);
-      this.latestScore={cp:cp?Number(cp[1]):undefined,mate:mate?Number(mate[1]):undefined,pv:pv?pv[1].trim().split(/\s+/):[]};
+      const multi=line.match(/\bmultipv\s+(\d+)/);
+      const score:EngineScore={cp:cp?Number(cp[1]):undefined,mate:mate?Number(mate[1]):undefined,pv:pv?pv[1].trim().split(/\s+/):[]};
+      const multipv=multi?Number(multi[1]):1;
+      if(score.pv.length){this.latestLines.set(multipv,{...score,multipv});if(multipv===1)this.latestScore=score}
       return;
     }
     if(line.startsWith('bestmove ')){
       const best=line.split(/\s+/)[1];
       const done=this.pending;this.pending=null;
-      done?.({bestMove:best==='(none)'?null:best,score:this.latestScore});
+      done?.({bestMove:best==='(none)'?null:best,score:this.latestScore,lines:[...this.latestLines.values()].sort((a,b)=>a.multipv-b.multipv)});
     }
   }
 
-  async search(fen:string,{skill=10,movetime=500,limitStrength=false,elo=1800}:{skill?:number;movetime?:number;limitStrength?:boolean;elo?:number}={}):Promise<SearchResult>{
+  async search(fen:string,{skill=10,movetime=500,limitStrength=false,elo=1800,multipv=1}:{skill?:number;movetime?:number;limitStrength?:boolean;elo?:number;multipv?:number}={}):Promise<SearchResult>{
     await this.readyPromise;
-    if(this.pending){this.worker.postMessage('stop');this.pending({bestMove:null,score:this.latestScore});this.pending=null}
-    this.latestScore={cp:0,pv:[]};
+    if(this.pending){this.worker.postMessage('stop');this.pending({bestMove:null,score:this.latestScore,lines:[...this.latestLines.values()].sort((a,b)=>a.multipv-b.multipv)});this.pending=null}
+    this.latestScore={cp:0,pv:[]};this.latestLines.clear();
+    this.worker.postMessage(`setoption name MultiPV value ${Math.max(1,Math.min(6,multipv))}`);
     this.worker.postMessage(`setoption name Skill Level value ${Math.max(0,Math.min(20,skill))}`);
     this.worker.postMessage(`setoption name UCI_LimitStrength value ${limitStrength?'true':'false'}`);
     if(limitStrength)this.worker.postMessage(`setoption name UCI_Elo value ${Math.max(1320,Math.min(3190,elo))}`);
