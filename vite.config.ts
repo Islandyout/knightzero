@@ -11,7 +11,7 @@ export default defineConfig({
       manifest: {
         name: 'KnightZero',
         short_name: 'KnightZero',
-        description: 'A fast, installable chess app with offline play.',
+        description: 'A fast, installable chess app powered by Stockfish 18.',
         theme_color: '#262421',
         background_color: '#262421',
         display: 'standalone',
@@ -23,7 +23,9 @@ export default defineConfig({
         navigateFallback: '/index.html',
         cleanupOutdatedCaches: true,
         clientsClaim: true,
-        skipWaiting: true
+        skipWaiting: true,
+        globPatterns: ['**/*.{js,css,html,svg,png,ico,wasm}'],
+        maximumFileSizeToCacheInBytes: 8 * 1024 * 1024
       }
     })
   ]
